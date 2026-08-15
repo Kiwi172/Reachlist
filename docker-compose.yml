@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: outreach
+      POSTGRES_PASSWORD: outreach
+      POSTGRES_DB: outreach
+    # 5433 rather than 5432, so this doesn't collide with any other
+    # Postgres already running on the host.
+    ports:
+      - '5433:5432'
+    volumes:
+      - outreach_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U outreach']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  outreach_db:

@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  name         String?
+  isAdmin      Boolean  @default(false) @map("is_admin")
+  tokenVersion Int      @default(0) @map("token_version")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  products  Product[]
+  campaigns Campaign[]
+
+  @@map("users")
+}
+
+// A thing the user is selling. The description here is the only input the
+// AI gets when generating targeting criteria, so it carries a lot of
+// weight — the UI nudges toward specificity.
+model Product {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String
+  websiteUrl  String?  @map("website_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  campaigns Campaign[]
+
+  @@index([userId])
+  @@map("products")
+}
+
+// One targeting run for one product. Criteria are AI-generated but always
+// surfaced for edit before discovery runs, because a bad criteria set is
+// how you end up emailing 400 irrelevant businesses.
+model Campaign {
+  id        String @id @default(cuid())
+  userId    String @map("user_id")
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String @map("product_id")
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name   String
+  // draft | discovering | ready | sending | paused | done
+  status String @default("draft")
+
+  // The AI's structured output, kept whole so we can show the user exactly
+  // what it decided and let them edit any field. Shape is validated
+  // against criteria.schema.js before it is ever used.
+  criteria Json
+
+  // Which discovery adapter the AI picked for these criteria: places | web.
+  // User can override in the UI.
+  discoveryMode String @default("places") @map("discovery_mode")
+
+  // Set when the safety monitor trips. Requires an explicit user action to
+  // clear — we never auto-resume a campaign that was paused for bounces.
+  pausedReason String?   @map("paused_reason")
+  pausedAt     DateTime? @map("paused_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  prospects Prospect[]
+  sends     Send[]
+
+  @@index([userId])
+  @@map("campaigns")
+}
+
+// A business found by discovery. Deduped per campaign on domain, since the
+// same business routinely appears under several names across sources.
+model Prospect {
+  id         String   @id @default(cuid())
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  name        String
+  domain      String?
+  websiteUrl  String? @map("website_url")
+  email       String?
+  // Where the address came from: site_contact_page | site_mailto |
+  // site_footer | places | manual. Anything not sourced from the business's
+  // own published pages is treated as low confidence.
+  emailSource String? @map("email_source")
+
+  phone       String?
+  address     String?
+  countryCode String? @map("country_code")
+  category    String?
+  rating      Float?
+  reviewCount Int?    @map("review_count")
+
+  // Free-form extras from the discovery source, kept for the draft prompt.
+  meta Json?
+
+  // AI's 0-1 judgement of how well this business matches the criteria,
+  // plus its one-line reason. Used to sort the review queue.
+  matchScore  Float?  @map("match_score")
+  matchReason String? @map("match_reason")
+
+  // pending | enriched | no_email | blocked_region | suppressed |
+  // drafted | approved | rejected | sent | failed
+  status String @default("pending")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  draft Draft?
+  sends Send[]
+
+  @@unique([campaignId, domain])
+  @@index([campaignId, status])
+  @@map("prospects")
+}
+
+model Draft {
+  id         String   @id @default(cuid())
+  prospectId String   @unique @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  subject String
+  body    String
+
+  // Set when a human edits the AI output. We keep both so the quality of
+  // the raw generation stays measurable over time.
+  editedSubject String? @map("edited_subject")
+  editedBody    String? @map("edited_body")
+
+  approvedAt DateTime? @map("approved_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@map("drafts")
+}
+
+model Send {
+  id         String   @id @default(cuid())
+  campaignId String   @map("campaign_id")
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  prospectId String   @map("prospect_id")
+  prospect   Prospect @relation(fields: [prospectId], references: [id], onDelete: Cascade)
+
+  toEmail String @map("to_email")
+  subject String
+  body    String
+
+  // queued | sent | bounced | complained | failed
+  status       String  @default("queued")
+  providerId   String? @map("provider_id")
+  errorMessage String? @map("error_message")
+
+  // Random per-send token embedded in the unsubscribe URL. Opaque so the
+  // link can be public without leaking prospect or campaign ids.
+  unsubscribeToken String @unique @map("unsubscribe_token")
+
+  sentAt    DateTime? @map("sent_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([campaignId, status])
+  @@index([createdAt])
+  @@map("sends")
+}
+
+// Global, permanent, and checked before every single send. Unsubscribes,
+// hard bounces and complaints all land here. Entries are never deleted —
+// re-emailing someone who opted out is the single clearest CAN-SPAM
+// violation and the most reliable way to get a domain blacklisted.
+model Suppression {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  // unsubscribe | bounce | complaint | manual
+  reason    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("suppressions")
+}
+
+// Rolling counter so send caps survive process restarts. One row per day.
+model SendQuota {
+  id    String @id @default(cuid())
+  day   String @unique
+  count Int    @default(0)
+
+  @@map("send_quotas")
+}
