@@ -1,5 +1,7 @@
 # Reachlist
 
+[![CI](https://github.com/Kiwi172/Reachlist/actions/workflows/ci.yml/badge.svg)](https://github.com/Kiwi172/Reachlist/actions/workflows/ci.yml)
+
 Describe a product in plain English; an AI builds a targeting profile from it,
 finds businesses that match, locates their published contact addresses, drafts
 a personalised email for each, and sends only what you approve.
